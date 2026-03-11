@@ -26,5 +26,5 @@ docker-volumes/
 .vscode/
 .idea/
 
-# OTHER I HAVE NO IDEA WHAT THIS IS
+# OPENAPI VIEWER
 .42c/
