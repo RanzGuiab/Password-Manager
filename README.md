@@ -1,1 +1,3 @@
 # Password-Manager
+
+MY_AWS_KEY: "AKIA1234567890EXAMPLE"

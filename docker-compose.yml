@@ -1,19 +1,44 @@
 services:
-  db:
-    image: postgres:15-alpine
-    environment:
-      POSTGRES_PASSWORD: password_placeholder # DevSecOps: We will move this to a secret later
-    ports:
-      - "5432:5432"
-
+  # The "Brain" (API)
   backend:
-    build: ./backend
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pm-backend
     ports:
       - "8080:8080"
-    depends_on:
-      - db
+    deploy:
+      resources:
+        limits:
+          memory: 512M # Keeping it lean for 8GB RAM
 
+  # The "Face" (UI)
   frontend:
-    build: ./frontend
+    build: 
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: pm-frontend
     ports:
       - "3000:3000"
+    depends_on:
+      - backend
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # The "Vault" (Database)
+  db:
+    image: postgres:15-alpine
+    container_name: pm-db
+    environment:
+      POSTGRES_DB: password_manager
+      POSTGRES_USER: dev_user
+      POSTGRES_PASSWORD: dev_password # We will secure this in the next phase
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+volumes:
+  db_data:
