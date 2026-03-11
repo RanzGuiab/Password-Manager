@@ -1,6 +1,1 @@
 # Password-Manager
-
-TEST_API_KEY = "sk_test_1234567890abcdefghijklmnop"
-AWS_KEY = "AKIA1234567890EXAMPLE"
-AWS_SEC = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-token: "02290a2a-7f5a-4836-8745-d4d797e475d0"
