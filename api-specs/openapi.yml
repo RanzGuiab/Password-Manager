@@ -1,0 +1,88 @@
+openapi: 3.0.3
+info:
+  title: "SecureVault API"
+  description: "Zero-knowledge Password Manager API. Handles encrypted blobs only."
+  version: "1.0.0"
+
+servers:
+  - url: "http://localhost:8080/"
+    description: "Local development server"
+
+paths:
+  /api/v1/auth/register:
+    post:
+      summary: "Register a new user"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserAuth'
+      responses:
+        '201':
+          description: "User created"
+        '400':
+          description: "Validation error"
+
+  /api/v1/vault:
+    get:
+      summary: "Get all secrets"
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: "List of encrypted secrets"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Secret'
+
+    post:
+        summary: "Store a new secret"
+        security:
+          - bearerAuth: []
+        requestBody:
+          required: true
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Secret'
+        responses:
+          '201':
+            description: "Secret created"
+          '400':
+            description: "Validation error"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    UserAuth:
+      type: object
+      required: [username, password_hash]
+      properties:
+        username:
+          type: string
+        password_hash:
+          type: string
+          description: "Client-side derived hash of the master password"
+
+    Secret:
+      type: object
+      required: [id, encrypted_data]
+      properties:
+        id:
+          type: string
+          format: uuid
+        label:
+          type: string
+          example: "Gmail Account"
+        encrypted_data:
+          type: string
+          description: "AES-256 encrypted payload"

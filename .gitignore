@@ -1,6 +1,30 @@
+# IGNORE MACOS SYSTEM FILES
 .DS_Store
+
+# DEPENDENCIES
 node_modules/
+.npm/
+
+# BUILD OUTPUT
 dist/
+build/
+*.exe
+*.dll
+
+# SECRETS
 .env
+.env.local
+*.pem
 *.log
+
+# Docker & Infra
 docker-volumes/
+*.log
+.docker/
+
+# IDE
+.vscode/
+.idea/
+
+# OTHER I HAVE NO IDEA WHAT THIS IS
+.42c/
