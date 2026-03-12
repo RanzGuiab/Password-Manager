@@ -27,6 +27,7 @@ func (v *VaultServer) PostApiV1AuthRegister(w http.ResponseWriter, r *http.Reque
 }
 
 func main() {
+	InitDB()
 	r := chi.NewRouter()
 
 	// Initialize our server implementation
@@ -35,6 +36,6 @@ func main() {
 	// This is the "Magic" line that connects your Spec to your Code
 	api.HandlerFromMux(vaultHandler, r)
 
-	fmt.Println("🛡️ SecureVault API listening on :8080")
+	fmt.Println("SecureVault API listening on :8080")
 	http.ListenAndServe(":8080", r)
 }
