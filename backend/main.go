@@ -24,23 +24,37 @@ func (v *VaultServer) PostApiV1Vault(w http.ResponseWriter, r *http.Request) {
 
 // (POST /api/v1/auth/register)
 func (v *VaultServer) PostApiV1AuthRegister(w http.ResponseWriter, r *http.Request) {
-	var newUser api.UserAuth
+	var newUser User
 
+	// 1. Decode the JSON body into the 'newUser' struct
 	if err := json.NewDecoder(r.Body).Decode(&newUser); err != nil {
-		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
 		return
 	}
 
+	// 2. STAGE: Validation (The fix for blank rows)
+	// If the user sends empty strings or the JSON keys were wrong, we stop here.
 	if newUser.Username == "" || newUser.PasswordHash == "" {
-		http.Error(w, "Username and password hash are required", http.StatusBadRequest)
+		http.Error(w, "Username and Password are required", http.StatusBadRequest)
 		return
 	}
 
-	result := DB.Create(&newUser)
-	if result.Error != nil {
-		http.Error(w, "User already exists or database error", http.StatusConflict)
+	// 3. STAGE: Mapping to the Secure Struct
+	// We manually transfer the validated data to our 'User' struct that has the unique index.
+	dbUser := User{
+		Username:     newUser.Username,
+		PasswordHash: newUser.PasswordHash,
+	}
+
+	// 4. STAGE: Database Insertion
+	if err := DB.Create(&dbUser).Error; err != nil {
+		// Because we have 'uni_users_username' in the DB,
+		// this triggers if the username already exists.
+		fmt.Printf("Database insertion error: %v\n", err)
+		http.Error(w, "User already exists", http.StatusConflict)
 		return
 	}
+
 	w.WriteHeader(http.StatusCreated)
 	fmt.Fprintf(w, "User %s registered successfully", newUser.Username)
 }

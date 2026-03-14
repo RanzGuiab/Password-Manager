@@ -12,6 +12,12 @@ import (
 
 var DB *gorm.DB
 
+type User struct {
+	ID           uint   `gorm:"primaryKey" json:"id"`
+	Username     string `gorm:"unique;not null" json:"username"`
+	PasswordHash string `gorm:"not null" json:"PasswordHash"`
+}
+
 func InitDB() {
 	user := os.Getenv("POSTGRES_USER")
 	pass := os.Getenv("POSTGRES_PASSWORD")
@@ -36,15 +42,18 @@ func InitDB() {
 			sqlDB, _ := DB.DB()
 			if err = sqlDB.Ping(); err == nil {
 				fmt.Println("🐘 Database connection established!")
+
+				fmt.Println("Running Auto-Migrations...")
+				err = DB.AutoMigrate(&User{}, &api.Secret{})
+				if err != nil {
+					fmt.Printf("Migration Failed: %v\n", err)
+				}
 				return
 			}
 		}
 
 		fmt.Printf("⏳ DB not ready yet: %v. Retrying in 2s...\n", err)
 		time.Sleep(2 * time.Second)
-
-		fmt.Println("Running Auto-Migrations...")
-		DB.AutoMigrate(&api.UserAuth{}, &api.Secret{})
 	}
 
 	fmt.Printf("❌ CRITICAL: Could not connect to DB after 10 attempts: %v\n", err)
