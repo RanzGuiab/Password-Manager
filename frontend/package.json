@@ -2,12 +2,22 @@
     "name": "pm-frontend",
     "version": "1.0.0",
     "scripts": {
-        "build": "mkdir -p dist && echo '<h1> Vault UI Coming Soon </h1>' > dist/index.html"
+        "build": "mkdir -p dist && echo '<h1> Vault UI Coming Soon </h1>' > dist/index.html",
+        "dev": "vite"
     },
     "description": "",
     "main": "index.js",
     "keywords": [],
     "author": "",
     "license": "ISC",
-    "type": "commonjs"
+    "type": "commonjs",
+    "devDependencies": {
+        "autoprefixer": "^10.4.27",
+        "postcss": "^8.5.8",
+        "tailwindcss": "^4.2.1"
+    },
+    "dependencies": {
+        "@tailwindcss/postcss": "^4.2.1",
+        "vite": "^8.0.0"
+    }
 }

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/go-chi/cors"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/rnz.gwb/Password-Manager/backend/api"
 )
@@ -63,12 +65,16 @@ func main() {
 	InitDB()
 	r := chi.NewRouter()
 
-	// Initialize our server implementation
-	vaultHandler := &VaultServer{}
+	// 1. Setup CORS
+	c := cors.New(cors.Options{
+		AllowedOrigins: []string{"http://localhost:5173"}, // Your Vite port
+		AllowedMethods: []string{"GET", "POST", "OPTIONS"},
+		AllowedHeaders: []string{"Content-Type", "Authorization"},
+	})
 
-	// This is the "Magic" line that connects your Spec to your Code
+	vaultHandler := &VaultServer{}
 	api.HandlerFromMux(vaultHandler, r)
 
 	fmt.Println("SecureVault API listening on :8080")
-	http.ListenAndServe(":8080", r)
+	http.ListenAndServe(":8080", c.Handler(r))
 }
