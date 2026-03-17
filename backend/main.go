@@ -48,8 +48,38 @@ func (v *VaultServer) GetApiV1Vault(w http.ResponseWriter, r *http.Request) {
 // (POST /api/v1/vault)
 func (v *VaultServer) PostApiV1Vault(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Sitename n
+		Sitename     string `json:"sitename"`
+		Siteusername string `json:"siteusername"`
+		Password     string `json:"password"`
 	}
+	if error := json.NewDecoder(r.Body).Decode(&input); error != nil {
+		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+		return
+	}
+
+	username := r.Context().Value("username").(string)
+	var user User
+	DB.Where("username = ?", username).First(&user)
+
+	encPass, iv, err := encrypt(input.Password)
+	if err != nil {
+		http.Error(w, "Encryption failed", http.StatusInternalServerError)
+		return
+	}
+
+	newSecret := Secret{
+		UserID:            user.ID,
+		SiteName:          input.Sitename,
+		SiteUsername:      input.Siteusername,
+		EncryptedPassword: encPass,
+		IV:                iv,
+	}
+	if err := DB.Create(&newSecret).Error; err != nil {
+		http.Error(w, "Failed to save secret", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	fmt.Fprintf(w, "Secret saved successfully")
 }
 
 // (POST /api/v1/auth/register)
