@@ -48,38 +48,51 @@ func (v *VaultServer) GetApiV1Vault(w http.ResponseWriter, r *http.Request) {
 // (POST /api/v1/vault)
 func (v *VaultServer) PostApiV1Vault(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Sitename     string `json:"sitename"`
-		Siteusername string `json:"siteusername"`
+		SiteName     string `json:"site_name"`
+		SiteUsername string `json:"site_username"`
 		Password     string `json:"password"`
 	}
-	if error := json.NewDecoder(r.Body).Decode(&input); error != nil {
-		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
+
+	// 1. Decode the JSON from the frontend
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
 
+	// 2. Validation
+	if input.SiteName == "" || input.Password == "" {
+		http.Error(w, "Site Name and Password are required", http.StatusBadRequest)
+		return
+	}
+
+	// 3. Get User ID from the context (set by your JWT Middleware)
 	username := r.Context().Value("username").(string)
 	var user User
 	DB.Where("username = ?", username).First(&user)
 
-	encPass, iv, err := encrypt(input.Password)
+	// 4. Encrypt the password
+	encPass, iv, err := encrypt(input.Password) // Using your AES-GCM logic
 	if err != nil {
 		http.Error(w, "Encryption failed", http.StatusInternalServerError)
 		return
 	}
 
+	// 5. Create the record
 	newSecret := Secret{
 		UserID:            user.ID,
-		SiteName:          input.Sitename,
-		SiteUsername:      input.Siteusername,
+		SiteName:          input.SiteName,
+		SiteUsername:      input.SiteUsername,
 		EncryptedPassword: encPass,
 		IV:                iv,
 	}
+
 	if err := DB.Create(&newSecret).Error; err != nil {
-		http.Error(w, "Failed to save secret", http.StatusInternalServerError)
+		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
+
 	w.WriteHeader(http.StatusCreated)
-	fmt.Fprintf(w, "Secret saved successfully")
+	fmt.Fprint(w, "Secret stored successfully")
 }
 
 // (POST /api/v1/auth/register)

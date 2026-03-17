@@ -6,18 +6,20 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"io"
 )
 
-var masterKey = []byte("my_32_byte_master_key_for_aes_256!!") // Must be 32 bytes for AES-256
+var masterKey = []byte("a-very-secret-key-32-chars-long!")
 
-func encrypt(plainText string) (string, string, error) {
+func encrypt(plaintext string) (string, string, error) {
 	block, err := aes.NewCipher(masterKey)
 	if err != nil {
+		fmt.Printf("Cipher Error: %v\n", err) // This will tell us if the key is the wrong size
 		return "", "", err
 	}
 
-	nonce := make([]byte, 12) // AES-GCM standard nonce size
+	nonce := make([]byte, 12)
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", "", err
 	}
@@ -27,8 +29,8 @@ func encrypt(plainText string) (string, string, error) {
 		return "", "", err
 	}
 
-	cipherText := aesgcm.Seal(nil, nonce, []byte(plainText), nil)
-	return hex.EncodeToString(cipherText), hex.EncodeToString(nonce), nil
+	ciphertext := aesgcm.Seal(nil, nonce, []byte(plaintext), nil)
+	return hex.EncodeToString(ciphertext), hex.EncodeToString(nonce), nil
 }
 
 func decrypt(cipherTextHex string, nonceHex string) (string, error) {
