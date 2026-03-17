@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/cors"
 
@@ -157,15 +159,16 @@ func main() {
 	vaultHandler := &VaultServer{}
 	api.HandlerFromMux(vaultHandler, r)
 
-	r.Group(func(r func(r chi.Router) {
+	r.Group(func(r chi.Router) {
 		api.HandlerFromMux(vaultHandler, r)
 	})
 
-	r.Group(func(r func(r chi.Router) {
+	// Protected Routes
+	r.Group(func(r chi.Router) {
 		r.Use(JWTMiddleware)
+		// Only routes defined in your OpenAPI spec for /vault will be affected
 		api.HandlerFromMux(vaultHandler, r)
 	})
-
 
 	fmt.Println("SecureVault API listening on :8080")
 	http.ListenAndServe(":8080", c.Handler(r))
