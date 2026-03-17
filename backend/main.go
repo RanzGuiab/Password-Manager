@@ -9,7 +9,31 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rnz.gwb/Password-Manager/backend/api"
+
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
+
+var jwtKey = []byte("my_secret_key")
+
+type Claims struct {
+	Username string `json:"username"`
+	jwt.RegisteredClaims
+}
+
+func GenerateJWT(username string) (string, error) {
+	expirationTime := time.Now().Add(24 * time.Hour)
+	claims := &Claims{
+		Username: username,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expirationTime),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(jwtKey)
+}
 
 // VaultServer implements the generated api.ServerInterface
 type VaultServer struct{}
@@ -61,11 +85,69 @@ func (v *VaultServer) PostApiV1AuthRegister(w http.ResponseWriter, r *http.Reque
 	fmt.Fprintf(w, "User %s registered successfully", newUser.Username)
 }
 
+func (v *VaultServer) PostApiV1AuthLogin(w http.ResponseWriter, r *http.Request) {
+	var loginReq User
+	if err := json.NewDecoder(r.Body).Decode(&loginReq); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	var dbUser User
+	if err := DB.Where("username = ?", loginReq.Username).First(&dbUser).Error; err != nil {
+		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
+		return
+	}
+
+	if dbUser.PasswordHash != loginReq.PasswordHash {
+		http.Error(w, "Invalid username or password", http.StatusUnauthorized)
+		return
+	}
+
+	token, err := GenerateJWT(dbUser.Username)
+	if err != nil {
+		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	response := map[string]string{
+		"messsage": "Login successful",
+		"token":    token,
+	}
+	json.NewEncoder(w).Encode(response)
+}
+
+func JWTMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			http.Error(w, "Missing authorization header", http.StatusUnauthorized)
+			return
+		}
+
+		bearerToken := strings.TrimPrefix(authHeader, "Bearer ")
+		claims := &Claims{}
+
+		token, err := jwt.ParseWithClaims(bearerToken, claims, func(token *jwt.Token) (interface{}, error) {
+			return jwtKey, nil
+		})
+
+		if err != nil || !token.Valid {
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), "username", claims.Username)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 func main() {
 	InitDB()
 	r := chi.NewRouter()
 
-	// 1. Setup CORS
 	c := cors.New(cors.Options{
 		AllowedOrigins: []string{"http://localhost:5173"}, // Your Vite port
 		AllowedMethods: []string{"GET", "POST", "OPTIONS"},
@@ -74,6 +156,16 @@ func main() {
 
 	vaultHandler := &VaultServer{}
 	api.HandlerFromMux(vaultHandler, r)
+
+	r.Group(func(r func(r chi.Router) {
+		api.HandlerFromMux(vaultHandler, r)
+	})
+
+	r.Group(func(r func(r chi.Router) {
+		r.Use(JWTMiddleware)
+		api.HandlerFromMux(vaultHandler, r)
+	})
+
 
 	fmt.Println("SecureVault API listening on :8080")
 	http.ListenAndServe(":8080", c.Handler(r))

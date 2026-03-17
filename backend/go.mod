@@ -10,6 +10,8 @@ require (
 	gorm.io/gorm v1.31.1
 )
 
+require github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
+
 require (
 	github.com/go-chi/cors v1.2.2
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
