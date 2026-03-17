@@ -47,7 +47,9 @@ func (v *VaultServer) GetApiV1Vault(w http.ResponseWriter, r *http.Request) {
 
 // (POST /api/v1/vault)
 func (v *VaultServer) PostApiV1Vault(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprint(w, "Storing new secret...")
+	var input struct {
+		Sitename n
+	}
 }
 
 // (POST /api/v1/auth/register)

@@ -13,9 +13,19 @@ import (
 var DB *gorm.DB
 
 type User struct {
-	ID           uint   `gorm:"primaryKey" json:"id"`
-	Username     string `gorm:"unique;not null" json:"username"`
-	PasswordHash string `gorm:"not null" json:"password_hash"`
+	ID           uint     `gorm:"primaryKey" json:"id"`
+	Username     string   `gorm:"unique;not null" json:"username"`
+	PasswordHash string   `gorm:"not null" json:"password_hash"`
+	Secrets      []Secret `gorm:"foreignKey:UserID" json:"-"`
+}
+
+type Secret struct {
+	ID                uint   `gorm:"primaryKey" json:"id"`
+	UserID            uint   `gorm:"not null" json:"user_id"`
+	SiteName          string `gorm:"not null" json:"site_name"`
+	SiteUsername      string `gorm:"not null" json:"site_username"`
+	EncryptedPassword string `gorm:"not null" json:"encrypted_password"`
+	IV                string `gorm:"not null" json:"iv"`
 }
 
 func InitDB() {
@@ -58,4 +68,5 @@ func InitDB() {
 
 	fmt.Printf("❌ CRITICAL: Could not connect to DB after 10 attempts: %v\n", err)
 	os.Exit(1)
+	DB.AutoMigrate(&User{}, &Secret{})
 }
