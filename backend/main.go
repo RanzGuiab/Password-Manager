@@ -19,7 +19,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
@@ -28,8 +27,6 @@ import (
 	"golang.org/x/crypto/argon2"
 	"gorm.io/gorm"
 )
-
-var jwtKey []byte
 
 type contextKey string
 
@@ -40,7 +37,6 @@ const (
 	maxAuthBodyBytes  int64 = 8 * 1024
 	maxVaultBodyBytes int64 = 64 * 1024
 
-	maxSiteFieldLen    = 128
 	maxCiphertextBytes = 16 * 1024
 
 	verifierPrefix         = "zkv1"
@@ -55,18 +51,24 @@ const (
 	loginLockDuration = 15 * time.Minute
 )
 
-var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{3,64}$`)
+var (
+	jwtKey []byte
+
+	allowLegacyPasswordFallback bool
+	enforceEncryptedMetadata    bool
+	enableHSTS                  bool
+
+	usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{3,64}$`)
+
+	loginAttemptsMu sync.Mutex
+	loginAttempts   = make(map[string]loginAttemptState)
+)
 
 type loginAttemptState struct {
 	Failures    int
 	WindowStart time.Time
 	LockedUntil time.Time
 }
-
-var (
-	loginAttemptsMu sync.Mutex
-	loginAttempts   = make(map[string]loginAttemptState)
-)
 
 type Claims struct {
 	Username string `json:"username"`
@@ -79,12 +81,55 @@ type errorResponse struct {
 	Error string `json:"error"`
 }
 
+func readBoolEnv(key string, def bool) bool {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		log.Printf("invalid %s=%q, using default=%v", key, raw, def)
+		return def
+	}
+	return v
+}
+
 func initSecrets() error {
-	jwtSecret := os.Getenv("JWT_SECRET")
+	jwtSecret := strings.TrimSpace(os.Getenv("JWT_SECRET"))
 	if len(jwtSecret) < 32 {
 		return fmt.Errorf("JWT_SECRET must be at least 32 characters")
 	}
 	jwtKey = []byte(jwtSecret)
+
+	allowLegacyPasswordFallback = readBoolEnv("ALLOW_LEGACY_PASSWORD_HASH", false)
+	enforceEncryptedMetadata = readBoolEnv("ENFORCE_ENCRYPTED_METADATA", true)
+	enableHSTS = readBoolEnv("ENABLE_HSTS", false)
+
+	if allowLegacyPasswordFallback {
+		log.Printf("WARNING: ALLOW_LEGACY_PASSWORD_HASH=true")
+	}
+	if !enforceEncryptedMetadata {
+		log.Printf("WARNING: ENFORCE_ENCRYPTED_METADATA=false")
+	}
+	return nil
+}
+
+func enforceNoLegacyPlaintextSecrets() error {
+	if !enforceEncryptedMetadata {
+		return nil
+	}
+
+	var count int64
+	err := DB.Model(&Secret{}).
+		Where("COALESCE(encrypted_site_name, '') = '' OR COALESCE(site_name_iv, '') = '' OR COALESCE(encrypted_site_username, '') = '' OR COALESCE(site_username_iv, '') = ''").
+		Count(&count).Error
+	if err != nil {
+		return err
+	}
+
+	if count > 0 {
+		return fmt.Errorf("found %d legacy/plaintext secret rows; migrate data or set ENFORCE_ENCRYPTED_METADATA=false temporarily", count)
+	}
 	return nil
 }
 
@@ -113,14 +158,12 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any, maxBytes int64)
 	if err := dec.Decode(dst); err != nil {
 		return err
 	}
-
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		if err == nil {
 			return errors.New("request body must contain a single JSON object")
 		}
 		return err
 	}
-
 	return nil
 }
 
@@ -128,12 +171,11 @@ func writeDecodeError(w http.ResponseWriter, err error) {
 	if err == nil {
 		return
 	}
-	msg := strings.ToLower(err.Error())
-
+	var maxBytesErr *http.MaxBytesError
 	switch {
-	case strings.Contains(msg, "http: request body too large"):
+	case errors.As(err, &maxBytesErr):
 		writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
-	case strings.Contains(msg, "content-type"):
+	case strings.Contains(strings.ToLower(err.Error()), "content-type"):
 		writeError(w, http.StatusUnsupportedMediaType, "content-type must be application/json")
 	default:
 		writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -170,10 +212,6 @@ func decodeBase64(value string) ([]byte, error) {
 
 func isValidUsername(username string) bool {
 	return usernameRe.MatchString(username)
-}
-
-func isValidTextField(value string, maxLen int) bool {
-	return value != "" && len(value) <= maxLen && utf8.ValidString(value)
 }
 
 func isValidClientPasswordHash(passwordHash string) bool {
@@ -250,7 +288,9 @@ func verifyPasswordVerifier(clientHash, stored string) bool {
 		return subtle.ConstantTimeCompare(expected, actual) == 1
 	}
 
-	// Legacy compatibility: old rows stored raw client hash.
+	if !allowLegacyPasswordFallback {
+		return false
+	}
 	return secureStringEqual(stored, clientHash)
 }
 
@@ -297,7 +337,6 @@ func isLoginLocked(key string) (bool, time.Duration) {
 	if !state.WindowStart.IsZero() && now.Sub(state.WindowStart) > loginWindow {
 		delete(loginAttempts, key)
 	}
-
 	return false, 0
 }
 
@@ -313,10 +352,7 @@ func recordLoginFailure(key string) {
 	}
 
 	if state.WindowStart.IsZero() || now.Sub(state.WindowStart) > loginWindow {
-		state = loginAttemptState{
-			Failures:    1,
-			WindowStart: now,
-		}
+		state = loginAttemptState{Failures: 1, WindowStart: now}
 	} else {
 		state.Failures++
 	}
@@ -332,6 +368,31 @@ func clearLoginFailures(key string) {
 	loginAttemptsMu.Lock()
 	defer loginAttemptsMu.Unlock()
 	delete(loginAttempts, key)
+}
+
+func startLoginAttemptsJanitor() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			now := time.Now()
+
+			loginAttemptsMu.Lock()
+			for key, state := range loginAttempts {
+				if !state.LockedUntil.IsZero() {
+					if now.After(state.LockedUntil.Add(loginWindow)) {
+						delete(loginAttempts, key)
+					}
+					continue
+				}
+				if !state.WindowStart.IsZero() && now.Sub(state.WindowStart) > loginWindow {
+					delete(loginAttempts, key)
+				}
+			}
+			loginAttemptsMu.Unlock()
+		}
+	}()
 }
 
 // (GET /api/v1/vault)
@@ -353,22 +414,46 @@ func (v *VaultServer) GetApiV1Vault(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type SecretResponse struct {
-		ID                uint   `json:"id"`
-		SiteName          string `json:"site_name"`
-		SiteUsername      string `json:"site_username"`
-		EncryptedPassword string `json:"encrypted_password"`
-		IV                string `json:"iv"`
+		ID                    uint   `json:"id"`
+		EncryptedSiteName     string `json:"encrypted_site_name"`
+		SiteNameIV            string `json:"site_name_iv"`
+		EncryptedSiteUsername string `json:"encrypted_site_username"`
+		SiteUsernameIV        string `json:"site_username_iv"`
+		EncryptedPassword     string `json:"encrypted_password"`
+		IV                    string `json:"iv"`
+		EncVersion            string `json:"enc_version"`
 	}
 
 	response := make([]SecretResponse, 0, len(user.Secrets))
+	legacySkipped := false
+
 	for _, s := range user.Secrets {
+		if s.EncryptedSiteName == "" || s.SiteNameIV == "" ||
+			s.EncryptedSiteUsername == "" || s.SiteUsernameIV == "" ||
+			s.EncryptedPassword == "" || s.IV == "" {
+			legacySkipped = true
+			continue
+		}
+
+		encVersion := strings.TrimSpace(s.EncVersion)
+		if encVersion == "" {
+			encVersion = "v1"
+		}
+
 		response = append(response, SecretResponse{
-			ID:                s.ID,
-			SiteName:          s.SiteName,
-			SiteUsername:      s.SiteUsername,
-			EncryptedPassword: s.EncryptedPassword,
-			IV:                s.IV,
+			ID:                    s.ID,
+			EncryptedSiteName:     s.EncryptedSiteName,
+			SiteNameIV:            s.SiteNameIV,
+			EncryptedSiteUsername: s.EncryptedSiteUsername,
+			SiteUsernameIV:        s.SiteUsernameIV,
+			EncryptedPassword:     s.EncryptedPassword,
+			IV:                    s.IV,
+			EncVersion:            encVersion,
 		})
+	}
+
+	if legacySkipped {
+		w.Header().Add("Warning", `299 - "legacy plaintext secrets omitted; migrate records"`)
 	}
 
 	writeJSON(w, http.StatusOK, response)
@@ -377,10 +462,13 @@ func (v *VaultServer) GetApiV1Vault(w http.ResponseWriter, r *http.Request) {
 // (POST /api/v1/vault)
 func (v *VaultServer) PostApiV1Vault(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		SiteName          string `json:"site_name"`
-		SiteUsername      string `json:"site_username"`
-		EncryptedPassword string `json:"encrypted_password"`
-		IV                string `json:"iv"`
+		EncryptedSiteName     string `json:"encrypted_site_name"`
+		SiteNameIV            string `json:"site_name_iv"`
+		EncryptedSiteUsername string `json:"encrypted_site_username"`
+		SiteUsernameIV        string `json:"site_username_iv"`
+		EncryptedPassword     string `json:"encrypted_password"`
+		IV                    string `json:"iv"`
+		EncVersion            string `json:"enc_version"`
 	}
 
 	if err := decodeJSON(w, r, &input, maxVaultBodyBytes); err != nil {
@@ -389,22 +477,35 @@ func (v *VaultServer) PostApiV1Vault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	input.SiteName = strings.TrimSpace(input.SiteName)
-	input.SiteUsername = strings.TrimSpace(input.SiteUsername)
+	input.EncryptedSiteName = strings.TrimSpace(input.EncryptedSiteName)
+	input.SiteNameIV = strings.TrimSpace(input.SiteNameIV)
+	input.EncryptedSiteUsername = strings.TrimSpace(input.EncryptedSiteUsername)
+	input.SiteUsernameIV = strings.TrimSpace(input.SiteUsernameIV)
 	input.EncryptedPassword = strings.TrimSpace(input.EncryptedPassword)
 	input.IV = strings.TrimSpace(input.IV)
+	input.EncVersion = strings.TrimSpace(input.EncVersion)
+	if input.EncVersion == "" {
+		input.EncVersion = "v1"
+	}
 
-	if input.SiteName == "" || input.SiteUsername == "" || input.EncryptedPassword == "" || input.IV == "" {
-		writeError(w, http.StatusBadRequest, "site_name, site_username, encrypted_password, and iv are required")
+	if input.EncryptedSiteName == "" || input.SiteNameIV == "" ||
+		input.EncryptedSiteUsername == "" || input.SiteUsernameIV == "" ||
+		input.EncryptedPassword == "" || input.IV == "" {
+		writeError(w, http.StatusBadRequest, "encrypted_site_name, site_name_iv, encrypted_site_username, site_username_iv, encrypted_password, and iv are required")
 		return
 	}
 
-	if !isValidTextField(input.SiteName, maxSiteFieldLen) || !isValidTextField(input.SiteUsername, maxSiteFieldLen) {
-		writeError(w, http.StatusBadRequest, "site_name and site_username must be valid UTF-8 and <= 128 chars")
+	if input.EncVersion != "v1" {
+		writeError(w, http.StatusBadRequest, "unsupported enc_version")
 		return
 	}
 
-	if !isValidCiphertext(input.EncryptedPassword) || !isValidIV(input.IV) {
+	if !isValidCiphertext(input.EncryptedSiteName) ||
+		!isValidIV(input.SiteNameIV) ||
+		!isValidCiphertext(input.EncryptedSiteUsername) ||
+		!isValidIV(input.SiteUsernameIV) ||
+		!isValidCiphertext(input.EncryptedPassword) ||
+		!isValidIV(input.IV) {
 		writeError(w, http.StatusBadRequest, "invalid encrypted payload")
 		return
 	}
@@ -426,11 +527,16 @@ func (v *VaultServer) PostApiV1Vault(w http.ResponseWriter, r *http.Request) {
 	}
 
 	newSecret := Secret{
-		UserID:            user.ID,
-		SiteName:          input.SiteName,
-		SiteUsername:      input.SiteUsername,
-		EncryptedPassword: input.EncryptedPassword,
-		IV:                input.IV,
+		UserID:                user.ID,
+		SiteName:              "",
+		SiteUsername:          "",
+		EncryptedSiteName:     input.EncryptedSiteName,
+		SiteNameIV:            input.SiteNameIV,
+		EncryptedSiteUsername: input.EncryptedSiteUsername,
+		SiteUsernameIV:        input.SiteUsernameIV,
+		EncryptedPassword:     input.EncryptedPassword,
+		IV:                    input.IV,
+		EncVersion:            input.EncVersion,
 	}
 
 	if err := DB.Create(&newSecret).Error; err != nil {
@@ -502,12 +608,10 @@ func (v *VaultServer) PostApiV1AuthRegister(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "username and password_hash are required")
 		return
 	}
-
 	if !isValidUsername(input.Username) {
 		writeError(w, http.StatusBadRequest, "username must be 3-64 chars: letters, numbers, _, ., -")
 		return
 	}
-
 	if !isValidClientPasswordHash(input.PasswordHash) {
 		writeError(w, http.StatusBadRequest, "invalid password_hash format")
 		return
@@ -541,43 +645,42 @@ func (v *VaultServer) PostApiV1AuthRegister(w http.ResponseWriter, r *http.Reque
 
 // (POST /api/v1/auth/login)
 func (v *VaultServer) PostApiV1AuthLogin(w http.ResponseWriter, r *http.Request) {
-	var loginReq struct {
+	var input struct {
 		Username     string `json:"username"`
 		PasswordHash string `json:"password_hash"`
 	}
 
-	if err := decodeJSON(w, r, &loginReq, maxAuthBodyBytes); err != nil {
+	if err := decodeJSON(w, r, &input, maxAuthBodyBytes); err != nil {
 		writeDecodeError(w, err)
 		return
 	}
 
-	loginReq.Username = strings.TrimSpace(loginReq.Username)
-	loginReq.PasswordHash = strings.TrimSpace(loginReq.PasswordHash)
+	input.Username = strings.TrimSpace(input.Username)
+	input.PasswordHash = strings.TrimSpace(input.PasswordHash)
 
-	if loginReq.Username == "" || loginReq.PasswordHash == "" {
+	if input.Username == "" || input.PasswordHash == "" {
 		writeError(w, http.StatusBadRequest, "username and password_hash are required")
 		return
 	}
-
-	if !isValidUsername(loginReq.Username) || !isValidClientPasswordHash(loginReq.PasswordHash) {
+	if !isValidUsername(input.Username) || !isValidClientPasswordHash(input.PasswordHash) {
 		writeError(w, http.StatusBadRequest, "invalid credentials format")
 		return
 	}
 
-	rateKey := loginRateKey(r, loginReq.Username)
+	rateKey := loginRateKey(r, input.Username)
 	if locked, retryIn := isLoginLocked(rateKey); locked {
 		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("too many login attempts, retry in %s", retryIn))
 		return
 	}
 
 	var dbUser User
-	if err := DB.Where("username = ?", loginReq.Username).First(&dbUser).Error; err != nil {
+	if err := DB.Where("username = ?", input.Username).First(&dbUser).Error; err != nil {
 		recordLoginFailure(rateKey)
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
 
-	if !verifyPasswordVerifier(loginReq.PasswordHash, dbUser.PasswordHash) {
+	if !verifyPasswordVerifier(input.PasswordHash, dbUser.PasswordHash) {
 		recordLoginFailure(rateKey)
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
@@ -585,9 +688,8 @@ func (v *VaultServer) PostApiV1AuthLogin(w http.ResponseWriter, r *http.Request)
 
 	clearLoginFailures(rateKey)
 
-	// Seamless upgrade for legacy rows.
 	if needsVerifierUpgrade(dbUser.PasswordHash) {
-		if upgraded, err := createPasswordVerifier(loginReq.PasswordHash); err == nil {
+		if upgraded, err := createPasswordVerifier(input.PasswordHash); err == nil {
 			_ = DB.Model(&dbUser).Update("password_hash", upgraded).Error
 		}
 	}
@@ -627,15 +729,15 @@ func JWTMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		bearerToken := strings.TrimSpace(parts[1])
-		if bearerToken == "" {
+		tokenString := strings.TrimSpace(parts[1])
+		if tokenString == "" {
 			writeError(w, http.StatusUnauthorized, "missing token")
 			return
 		}
 
 		claims := &Claims{}
 		token, err := jwt.ParseWithClaims(
-			bearerToken,
+			tokenString,
 			claims,
 			func(token *jwt.Token) (any, error) {
 				if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -647,7 +749,6 @@ func JWTMiddleware(next http.Handler) http.Handler {
 			jwt.WithIssuer(jwtIssuer),
 			jwt.WithLeeway(30*time.Second),
 		)
-
 		if err != nil || !token.Valid || claims.Username == "" || claims.Subject != claims.Username {
 			writeError(w, http.StatusUnauthorized, "invalid or expired token")
 			return
@@ -658,6 +759,23 @@ func JWTMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func SecurityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-site")
+
+		if enableHSTS && (r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	if err := initSecrets(); err != nil {
 		fmt.Printf("❌ startup error: %v\n", err)
@@ -665,25 +783,39 @@ func main() {
 	}
 
 	InitDB()
+
+	if err := enforceNoLegacyPlaintextSecrets(); err != nil {
+		fmt.Printf("❌ startup error: %v\n", err)
+		os.Exit(1)
+	}
+
+	startLoginAttemptsJanitor()
+
 	r := chi.NewRouter()
+	r.Use(SecurityHeadersMiddleware)
+
+	v := &VaultServer{}
+
+	// Public
+	r.Post("/api/v1/auth/register", v.PostApiV1AuthRegister)
+	r.Post("/api/v1/auth/login", v.PostApiV1AuthLogin)
+
+	// Protected
+	r.With(JWTMiddleware).Get("/api/v1/auth/session", v.GetApiV1AuthSession)
+	r.With(JWTMiddleware).Get("/api/v1/vault", v.GetApiV1Vault)
+	r.With(JWTMiddleware).Post("/api/v1/vault", v.PostApiV1Vault)
+	r.With(JWTMiddleware).Delete("/api/v1/vault/{id}", v.DeleteApiV1VaultId)
+
+	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	c := cors.New(cors.Options{
 		AllowedOrigins: []string{"http://localhost:5173", "http://localhost:3000"},
 		AllowedMethods: []string{"GET", "POST", "DELETE", "OPTIONS"},
 		AllowedHeaders: []string{"Content-Type", "Authorization"},
+		MaxAge:         300,
 	})
-
-	vaultHandler := &VaultServer{}
-
-	// Public
-	r.Post("/api/v1/auth/register", vaultHandler.PostApiV1AuthRegister)
-	r.Post("/api/v1/auth/login", vaultHandler.PostApiV1AuthLogin)
-
-	// Protected
-	r.With(JWTMiddleware).Get("/api/v1/auth/session", vaultHandler.GetApiV1AuthSession)
-	r.With(JWTMiddleware).Get("/api/v1/vault", vaultHandler.GetApiV1Vault)
-	r.With(JWTMiddleware).Post("/api/v1/vault", vaultHandler.PostApiV1Vault)
-	r.With(JWTMiddleware).Delete("/api/v1/vault/{id}", vaultHandler.DeleteApiV1VaultId)
 
 	server := &http.Server{
 		Addr:              ":8080",

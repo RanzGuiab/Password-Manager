@@ -29,7 +29,10 @@ export default function AddSecretForm({ onSecretAdded }: AddSecretFormProps) {
             return;
         }
 
-        if (!siteName.trim() || !username.trim() || !password) {
+        const trimmedSiteName = siteName.trim();
+        const trimmedSiteUsername = username.trim();
+
+        if (!trimmedSiteName || !trimmedSiteUsername || !password) {
             setStatus("All fields are required.");
             return;
         }
@@ -37,28 +40,36 @@ export default function AddSecretForm({ onSecretAdded }: AddSecretFormProps) {
         setStatus('Encrypting and saving...');
 
         try {
-            const { encrypted, iv } = await encrypt(encryptionKey, password);
+            const { encrypted: encryptedSiteName, iv: siteNameIV } = await encrypt(encryptionKey, trimmedSiteName);
+            const { encrypted: encryptedSiteUsername, iv: siteUsernameIV } = await encrypt(encryptionKey, trimmedSiteUsername);
+            const { encrypted: encryptedPassword, iv } = await encrypt(encryptionKey, password);
 
-            if (typeof encrypted !== 'string' || typeof iv !== 'string') {
-                throw new Error('Encryption output must be strings.');
-            }
-
-            // Ensure backend gets JSON-safe base64 text
             const b64 = /^[A-Za-z0-9+/]+={0,2}$/;
-            if (!b64.test(encrypted) || !b64.test(iv)) {
-                throw new Error('Ciphertext/IV are not base64.');
+            const allEncrypted = [
+                encryptedSiteName,
+                siteNameIV,
+                encryptedSiteUsername,
+                siteUsernameIV,
+                encryptedPassword,
+                iv,
+            ];
+            if (!allEncrypted.every((v) => typeof v === 'string' && b64.test(v))) {
+                throw new Error('Encryption output is not valid base64.');
             }
 
             const payload = {
-                site_name: siteName.trim(),
-                site_username: username.trim(), // if backend expects json:"username", rename this key
-                encrypted_password: encrypted,
+                encrypted_site_name: encryptedSiteName,
+                site_name_iv: siteNameIV,
+                encrypted_site_username: encryptedSiteUsername,
+                site_username_iv: siteUsernameIV,
+                encrypted_password: encryptedPassword,
                 iv,
+                enc_version: 'v1',
             };
 
             await axios.post(
                 'http://localhost:8080/api/v1/vault',
-                payload, // <-- do NOT JSON.stringify here
+                payload,
                 {
                     headers: {
                         Authorization: `Bearer ${token}`,

@@ -8,12 +8,22 @@ import { useEncryptionKey } from '../context/EncryptionKeyContext';
 // ... (interface definitions remain the same)
 interface RawSecret {
     id: number;
-    site_name: string;
-    site_username: string;
+    encrypted_site_name?: string;
+    site_name_iv?: string;
+    encrypted_site_username?: string;
+    site_username_iv?: string;
     encrypted_password: string;
     iv: string;
+    enc_version?: string;
+
+    // Legacy fallback fields (old rows)
+    site_name?: string;
+    site_username?: string;
 }
-interface DecryptedSecret extends Omit<RawSecret, 'encrypted_password' | 'iv'> {
+interface DecryptedSecret {
+    id: number;
+    site_name: string;
+    site_username: string;
     password: string;
 }
 
@@ -50,29 +60,56 @@ export default function Vault({ onLogout }: VaultProps) {
     }
   }, [token, encryptionKey, fetchSecrets]);
 
+  const decryptField = useCallback(
+    async (ciphertext?: string, iv?: string): Promise<string | null> => {
+      if (!encryptionKey || !ciphertext || !iv) return null;
+      try {
+        return await decrypt(encryptionKey, ciphertext, iv);
+      } catch {
+        return null;
+      }
+    },
+    [encryptionKey]
+  );
+
   useEffect(() => {
-    const decryptSecrets = async () => {
-      if (!encryptionKey || !secrets.length) {
+    let active = true;
+
+    const decryptAll = async () => {
+      if (!encryptionKey) {
         setDecryptedSecrets([]);
+        setIsLoading(false);
         return;
       }
-      
-      const decrypted = await Promise.all(
-        secrets.map(async (secret) => {
-          try {
-            const decryptedPassword = await decrypt(encryptionKey, secret.encrypted_password, secret.iv);
-            return { ...secret, password: decryptedPassword };
-          } catch (error) {
-            console.error(`Failed to decrypt secret ID ${secret.id}:`, error);
-            return { ...secret, password: "DECRYPTION FAILED" };
-          }
+
+      const output = await Promise.all(
+        secrets.map(async (secret): Promise<DecryptedSecret> => {
+          const [siteName, siteUsername, password] = await Promise.all([
+            decryptField(secret.encrypted_site_name, secret.site_name_iv),
+            decryptField(secret.encrypted_site_username, secret.site_username_iv),
+            decryptField(secret.encrypted_password, secret.iv),
+          ]);
+
+          return {
+            id: secret.id,
+            site_name: siteName ?? secret.site_name ?? 'DECRYPTION FAILED',
+            site_username: siteUsername ?? secret.site_username ?? 'DECRYPTION FAILED',
+            password: password ?? 'DECRYPTION FAILED',
+          };
         })
       );
-      setDecryptedSecrets(decrypted);
+
+      if (active) {
+        setDecryptedSecrets(output);
+        setIsLoading(false);
+      }
     };
 
-    decryptSecrets();
-  }, [secrets, encryptionKey]);
+    void decryptAll();
+    return () => {
+      active = false;
+    };
+  }, [secrets, encryptionKey, decryptField]);
 
   const handleDelete = async (id: number) => {
     if (window.confirm("Are you sure you want to permanently delete this secret?")) {

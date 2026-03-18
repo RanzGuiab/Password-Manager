@@ -70,7 +70,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Secret'
+                $ref: '#/components/schemas/CreateSecretRequest'
         responses:
           '201':
             description: "Secret created"
@@ -95,16 +95,53 @@ components:
           type: string
           description: "Client-side derived hash of the master password"
 
+    CreateSecretRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - encrypted_site_name
+        - site_name_iv
+        - encrypted_site_username
+        - site_username_iv
+        - encrypted_password
+        - iv
+      properties:
+        encrypted_site_name:
+          type: string
+        site_name_iv:
+          type: string
+        encrypted_site_username:
+          type: string
+        site_username_iv:
+          type: string
+        encrypted_password:
+          type: string
+        iv:
+          type: string
+        enc_version:
+          type: string
+          default: v1
+
     Secret:
       type: object
-      required: [id, encrypted_data]
+      required:
+        - id
+        - encrypted_password
+        - iv
       properties:
         id:
+          type: integer
+        encrypted_site_name:
           type: string
-          format: uuid
-        label:
+        site_name_iv:
           type: string
-          example: "Gmail Account"
-        encrypted_data:
+        encrypted_site_username:
           type: string
-          description: "AES-256 encrypted payload"
+        site_username_iv:
+          type: string
+        encrypted_password:
+          type: string
+        iv:
+          type: string
+        enc_version:
+          type: string
