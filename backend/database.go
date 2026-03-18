@@ -12,19 +12,19 @@ import (
 var DB *gorm.DB
 
 type User struct {
-	ID           uint     `gorm:"primaryKey" json:"id"`
-	Username     string   `gorm:"unique;not null" json:"username"`
-	PasswordHash string   `gorm:"not null" json:"password_hash"`
-	Secrets      []Secret `gorm:"foreignKey:UserID"`
+    ID           uint     `gorm:"primaryKey" json:"id"`
+    Username     string   `gorm:"unique;not null" json:"username"`
+    PasswordHash string   `gorm:"not null" json:"password_hash"`
+    Secrets      []Secret `gorm:"foreignKey:UserID;constraint:OnUpdate:CASCADE,OnDelete:CASCADE;"`
 }
 
 type Secret struct {
-	ID                uint   `gorm:"primaryKey;autoIncrement" json:"id"`
-	UserID            uint   `gorm:"not null" json:"user_id"`
-	SiteName          string `gorm:"not null" json:"site_name"`
-	SiteUsername      string `gorm:"not null" json:"site_username"`
-	EncryptedPassword string `gorm:"not null" json:"encrypted_password"`
-	IV                string `gorm:"not null" json:"iv"`
+    ID                uint   `gorm:"primaryKey;autoIncrement" json:"id"`
+    UserID            uint   `gorm:"not null;index" json:"user_id"`
+    SiteName          string `gorm:"not null" json:"site_name"`
+    SiteUsername      string `gorm:"not null" json:"site_username"`
+    EncryptedPassword string `gorm:"not null" json:"encrypted_password"`
+    IV                string `gorm:"not null" json:"iv"`
 }
 
 func InitDB() {

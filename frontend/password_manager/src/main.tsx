@@ -1,10 +1,13 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import App from './App.tsx' // Ensure the .tsx extension is present
-import './index.css' // Your Tailwind styles
+import App from './App.tsx'
+import './index.css'
+import { EncryptionKeyProvider } from './context/EncryptionKeyContext'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    <EncryptionKeyProvider>
+      <App />
+    </EncryptionKeyProvider>
   </React.StrictMode>,
 )
