@@ -1,11 +1,11 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"context"
 
 	"github.com/go-chi/cors"
 
@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
 )
 
 var jwtKey = []byte("my_secret_key")
@@ -42,7 +43,38 @@ type VaultServer struct{}
 
 // (GET /api/v1/vault)
 func (v *VaultServer) GetApiV1Vault(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprint(w, "Returning encrypted secrets...")
+    // 1. Get current user from context
+    username := r.Context().Value("username").(string)
+    var user User
+    DB.Where("username = ?", username).Preload("Secrets").First(&user)
+
+    // 2. Prepare the list for the frontend
+    type SecretResponse struct {
+        ID           uint   `json:"id"`
+        SiteName     string `json:"site_name"`
+        SiteUsername string `json:"site_username"`
+        Password     string `json:"password"`
+    }
+
+    var response []SecretResponse
+
+    for _, s := range user.Secrets {
+        // 3. Decrypt each password on the fly
+        decrypted, err := decrypt(s.EncryptedPassword, s.IV)
+        if err != nil {
+            continue // Skip corrupted entries
+        }
+
+        response = append(response, SecretResponse{
+            ID:           s.ID,
+            SiteName:     s.SiteName,
+            SiteUsername: s.SiteUsername,
+            Password:     decrypted,
+        })
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(response)
 }
 
 // (POST /api/v1/vault)
@@ -166,53 +198,70 @@ func (v *VaultServer) PostApiV1AuthLogin(w http.ResponseWriter, r *http.Request)
 	json.NewEncoder(w).Encode(response)
 }
 
+func (v *VaultServer) DeleteApiV1VaultId(w http.ResponseWriter, r *http.Request, id string) {
+    username := r.Context().Value("username").(string)
+    var user User
+    DB.Where("username = ?", username).First(&user)
+
+    // Ensure the secret belongs to the user before deleting
+    if err := DB.Where("id = ? AND user_id = ?", id, user.ID).Delete(&Secret{}).Error; err != nil {
+        http.Error(w, "Delete failed", http.StatusInternalServerError)
+        return
+    }
+    w.WriteHeader(http.StatusNoContent)
+}
+
 func JWTMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			http.Error(w, "Missing authorization header", http.StatusUnauthorized)
-			return
-		}
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        authHeader := r.Header.Get("Authorization")
+        if authHeader == "" {
+            http.Error(w, "Missing authorization header", http.StatusUnauthorized)
+            return
+        }
 
-		bearerToken := strings.TrimPrefix(authHeader, "Bearer ")
-		claims := &Claims{}
+        // Expecting "Bearer <token>"
+        bearerToken := strings.TrimPrefix(authHeader, "Bearer ")
+        claims := &Claims{}
 
-		token, err := jwt.ParseWithClaims(bearerToken, claims, func(token *jwt.Token) (interface{}, error) {
-			return jwtKey, nil
-		})
+        token, err := jwt.ParseWithClaims(bearerToken, claims, func(token *jwt.Token) (interface{}, error) {
+            return jwtKey, nil
+        })
 
-		if err != nil || !token.Valid {
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
-			return
-		}
+        if err != nil || !token.Valid {
+            http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
+            return
+        }
 
-		ctx := context.WithValue(r.Context(), "username", claims.Username)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+        // Add the username to the request context so handlers know who is logged in
+        ctx := context.WithValue(r.Context(), "username", claims.Username)
+        next.ServeHTTP(w, r.WithContext(ctx))
+    })
 }
 
 func main() {
 	InitDB()
 	r := chi.NewRouter()
 
+	// CORS must be at the top level
 	c := cors.New(cors.Options{
-		AllowedOrigins: []string{"http://localhost:5173"}, // Your Vite port
+		AllowedOrigins: []string{"http://localhost:5173", "http://localhost:3000"},
 		AllowedMethods: []string{"GET", "POST", "OPTIONS"},
 		AllowedHeaders: []string{"Content-Type", "Authorization"},
 	})
 
 	vaultHandler := &VaultServer{}
-	api.HandlerFromMux(vaultHandler, r)
 
+	// 1. PUBLIC ROUTES (Login & Register)
 	r.Group(func(r chi.Router) {
+		// Use the handler without the JWTMiddleware here
 		api.HandlerFromMux(vaultHandler, r)
 	})
 
-	// Protected Routes
-	r.Group(func(r chi.Router) {
-		r.Use(JWTMiddleware)
-		// Only routes defined in your OpenAPI spec for /vault will be affected
-		api.HandlerFromMux(vaultHandler, r)
+	// 2. PROTECTED ROUTES (Vault)
+	r.Route("/api/v1/vault", func(r chi.Router) {
+		r.Use(JWTMiddleware) // The bouncer only stands here
+		r.Get("/", vaultHandler.GetApiV1Vault)
+		r.Post("/", vaultHandler.PostApiV1Vault)
 	})
 
 	fmt.Println("SecureVault API listening on :8080")

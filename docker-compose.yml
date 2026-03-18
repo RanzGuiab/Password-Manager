@@ -19,8 +19,8 @@ services:
   # The "Face" (UI)
   frontend:
     build: 
-      context: ./frontend
-      dockerfile: Dockerfile
+      context: ./frontend/password_manager
+      dockerfile: ../Dockerfile
     container_name: pm-frontend
     ports:
       - "3000:80"
