@@ -1,11 +1,12 @@
 // frontend/password_manager/src/components/login.tsx
 import { useState } from 'react';
-import axios from 'axios';
 import { hashPassword, deriveKey } from '../utils/crypto';
 import { useEncryptionKey } from '../context/EncryptionKeyContext';
+import api from '../lib/api';
 
 interface LoginProps {
   onLoginSuccess: (key: CryptoKey) => void;
+  hasActiveSession?: boolean;
 }
 
 function base64ToArrayBuffer(base64: string): Uint8Array {
@@ -18,7 +19,7 @@ function base64ToArrayBuffer(base64: string): Uint8Array {
     return bytes;
 }
 
-export default function Login({ onLoginSuccess }: LoginProps) {
+export default function Login({ onLoginSuccess, hasActiveSession = false }: LoginProps) {
   const [username, setUsername] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [status, setStatus] = useState<string>('');
@@ -26,44 +27,55 @@ export default function Login({ onLoginSuccess }: LoginProps) {
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    setStatus("Authenticating and deriving key...");
+
+    const normalizedUsername = username.trim();
+    if (!normalizedUsername || !password) {
+      setStatus("Username and password are required.");
+      return;
+    }
 
     try {
-      // 1. Retrieve the user's salt from local storage
-      const saltBase64 = localStorage.getItem(`salt_${username}`);
+      const saltBase64 = localStorage.getItem(`salt_${normalizedUsername}`);
       if (!saltBase64) {
         setStatus("Login failed: Username not found or salt missing.");
         return;
       }
       const salt = base64ToArrayBuffer(saltBase64);
 
-      // 2. Hash the password for login verification
-      const loginHash = await hashPassword(password);
-      
-      // 3. Send credentials to the server
-      const res = await axios.post('http://localhost:8080/api/v1/auth/login', {
-        username,
-        password_hash: loginHash
-      });
-      
-      // If server auth is successful, THEN we derive the key for local use
-      setStatus("Login successful! Deriving encryption key...");
+      const existingToken = localStorage.getItem('vault_token');
+
+      if (hasActiveSession && existingToken) {
+        setStatus("Session found. Unlocking vault...");
+        await api.get('/api/v1/auth/session');
+      } else {
+        setStatus("Authenticating and deriving key...");
+        const passwordHash = await hashPassword(password);
+
+        const res = await api.post('/api/v1/auth/login', {
+          username: normalizedUsername,
+          password_hash: passwordHash,
+        });
+
+        const token = res.data?.token as string | undefined;
+        if (!token) throw new Error('missing auth token');
+        localStorage.setItem('vault_token', token);
+      }
+
       const newEncryptionKey = await deriveKey(password, salt);
-      
-      // 4. Store the session token
-      localStorage.setItem('vault_token', res.data.token);
-      
-      // 5. Set the key in the global context and switch view
       setEncryptionKey(newEncryptionKey);
       onLoginSuccess(newEncryptionKey);
+      setStatus("Unlocked.");
     } catch (err: any) {
-      console.error(err);
-      setStatus(`Error: ${err.response?.data?.error || "Invalid credentials"}`);
+      if (err?.response?.status === 401) {
+        localStorage.removeItem('vault_token');
+      }
+      setStatus(`Error: ${err?.response?.data?.error || err?.message || "Invalid credentials"}`);
     }
   };
 
   const token = localStorage.getItem('vault_token');
-  const message = token ? "Unlock Your Vault" : "Vault Login";
+  const unlockMode = hasActiveSession || !!token;
+  const message = unlockMode ? "Unlock Your Vault" : "Vault Login";
 
   return (
     <div className="p-6 max-w-sm mx-auto bg-slate-900 rounded-xl border border-slate-700">
@@ -84,7 +96,7 @@ export default function Login({ onLoginSuccess }: LoginProps) {
           value={password}
         />
         <button type="submit" className="bg-emerald-500 hover:bg-emerald-600 py-2 rounded font-bold transition-colors">
-            {token ? "Unlock" : "Open Vault"}
+          {unlockMode ? "Unlock" : "Open Vault"}
         </button>
       </form>
       {status && <p className="text-sm mt-2 italic text-slate-400">{status}</p>}

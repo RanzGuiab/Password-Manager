@@ -54,9 +54,8 @@ const (
 var (
 	jwtKey []byte
 
-	allowLegacyPasswordFallback bool
-	enforceEncryptedMetadata    bool
-	enableHSTS                  bool
+	enforceEncryptedMetadata bool
+	enableHSTS               bool
 
 	usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{3,64}$`)
 
@@ -101,15 +100,28 @@ func initSecrets() error {
 	}
 	jwtKey = []byte(jwtSecret)
 
-	allowLegacyPasswordFallback = readBoolEnv("ALLOW_LEGACY_PASSWORD_HASH", false)
 	enforceEncryptedMetadata = readBoolEnv("ENFORCE_ENCRYPTED_METADATA", true)
 	enableHSTS = readBoolEnv("ENABLE_HSTS", false)
 
-	if allowLegacyPasswordFallback {
-		log.Printf("WARNING: ALLOW_LEGACY_PASSWORD_HASH=true")
+	if err := initMFAFromEnv(); err != nil {
+		return err
 	}
+
 	if !enforceEncryptedMetadata {
 		log.Printf("WARNING: ENFORCE_ENCRYPTED_METADATA=false")
+	}
+	return nil
+}
+
+func enforceNoLegacyPasswordHashes() error {
+	var count int64
+	if err := DB.Model(&User{}).
+		Where("password_hash NOT LIKE ?", verifierPrefix+"$%").
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return fmt.Errorf("found %d legacy password_hash rows; migrate rows before startup", count)
 	}
 	return nil
 }
@@ -260,38 +272,35 @@ func secureStringEqual(a, b string) bool {
 }
 
 func verifyPasswordVerifier(clientHash, stored string) bool {
-	if strings.HasPrefix(stored, verifierPrefix+"$") {
-		parts := strings.Split(stored, "$")
-		if len(parts) != 3 || parts[0] != verifierPrefix {
-			return false
-		}
-
-		salt, err := base64.RawStdEncoding.DecodeString(parts[1])
-		if err != nil || len(salt) != verifierSaltLen {
-			return false
-		}
-
-		expected, err := base64.RawStdEncoding.DecodeString(parts[2])
-		if err != nil || len(expected) == 0 {
-			return false
-		}
-
-		actual := argon2.IDKey(
-			[]byte(clientHash),
-			salt,
-			verifierTime,
-			verifierMemory,
-			verifierThreads,
-			uint32(len(expected)),
-		)
-
-		return subtle.ConstantTimeCompare(expected, actual) == 1
-	}
-
-	if !allowLegacyPasswordFallback {
+	if !strings.HasPrefix(stored, verifierPrefix+"$") {
 		return false
 	}
-	return secureStringEqual(stored, clientHash)
+
+	parts := strings.Split(stored, "$")
+	if len(parts) != 3 || parts[0] != verifierPrefix {
+		return false
+	}
+
+	salt, err := base64.RawStdEncoding.DecodeString(parts[1])
+	if err != nil || len(salt) != verifierSaltLen {
+		return false
+	}
+
+	expected, err := base64.RawStdEncoding.DecodeString(parts[2])
+	if err != nil || len(expected) == 0 {
+		return false
+	}
+
+	actual := argon2.IDKey(
+		[]byte(clientHash),
+		salt,
+		verifierTime,
+		verifierMemory,
+		verifierThreads,
+		uint32(len(expected)),
+	)
+
+	return subtle.ConstantTimeCompare(expected, actual) == 1
 }
 
 func needsVerifierUpgrade(stored string) bool {
@@ -425,14 +434,16 @@ func (v *VaultServer) GetApiV1Vault(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response := make([]SecretResponse, 0, len(user.Secrets))
-	legacySkipped := false
-
 	for _, s := range user.Secrets {
-		if s.EncryptedSiteName == "" || s.SiteNameIV == "" ||
-			s.EncryptedSiteUsername == "" || s.SiteUsernameIV == "" ||
-			s.EncryptedPassword == "" || s.IV == "" {
-			legacySkipped = true
-			continue
+		if strings.TrimSpace(s.EncryptedSiteName) == "" ||
+			strings.TrimSpace(s.SiteNameIV) == "" ||
+			strings.TrimSpace(s.EncryptedSiteUsername) == "" ||
+			strings.TrimSpace(s.SiteUsernameIV) == "" ||
+			strings.TrimSpace(s.EncryptedPassword) == "" ||
+			strings.TrimSpace(s.IV) == "" {
+			log.Printf("secret integrity error: user=%s secret_id=%d", username, s.ID)
+			writeError(w, http.StatusInternalServerError, "secret storage integrity error")
+			return
 		}
 
 		encVersion := strings.TrimSpace(s.EncVersion)
@@ -450,10 +461,6 @@ func (v *VaultServer) GetApiV1Vault(w http.ResponseWriter, r *http.Request) {
 			IV:                    s.IV,
 			EncVersion:            encVersion,
 		})
-	}
-
-	if legacySkipped {
-		w.Header().Add("Warning", `299 - "legacy plaintext secrets omitted; migrate records"`)
 	}
 
 	writeJSON(w, http.StatusOK, response)
@@ -528,8 +535,6 @@ func (v *VaultServer) PostApiV1Vault(w http.ResponseWriter, r *http.Request) {
 
 	newSecret := Secret{
 		UserID:                user.ID,
-		SiteName:              "",
-		SiteUsername:          "",
 		EncryptedSiteName:     input.EncryptedSiteName,
 		SiteNameIV:            input.SiteNameIV,
 		EncryptedSiteUsername: input.EncryptedSiteUsername,
@@ -688,10 +693,18 @@ func (v *VaultServer) PostApiV1AuthLogin(w http.ResponseWriter, r *http.Request)
 
 	clearLoginFailures(rateKey)
 
-	if needsVerifierUpgrade(dbUser.PasswordHash) {
-		if upgraded, err := createPasswordVerifier(input.PasswordHash); err == nil {
-			_ = DB.Model(&dbUser).Update("password_hash", upgraded).Error
+	if dbUser.MFAEnabled {
+		mfaToken, err := newMFAToken(dbUser.Username, mfaPurposeLogin, "", mfaLoginTTL)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to generate mfa challenge")
+			return
 		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message":      "mfa required",
+			"mfa_required": true,
+			"mfa_token":    mfaToken,
+		})
+		return
 	}
 
 	token, err := GenerateJWT(dbUser.Username)
@@ -784,6 +797,10 @@ func main() {
 
 	InitDB()
 
+	if err := enforceNoLegacyPasswordHashes(); err != nil {
+		fmt.Printf("❌ startup error: %v\n", err)
+		os.Exit(1)
+	}
 	if err := enforceNoLegacyPlaintextSecrets(); err != nil {
 		fmt.Printf("❌ startup error: %v\n", err)
 		os.Exit(1)
@@ -799,9 +816,14 @@ func main() {
 	// Public
 	r.Post("/api/v1/auth/register", v.PostApiV1AuthRegister)
 	r.Post("/api/v1/auth/login", v.PostApiV1AuthLogin)
+	r.Post("/api/v1/auth/mfa/verify-login", v.PostApiV1AuthMfaVerifyLogin)
 
 	// Protected
 	r.With(JWTMiddleware).Get("/api/v1/auth/session", v.GetApiV1AuthSession)
+	r.With(JWTMiddleware).Get("/api/v1/auth/mfa/status", v.GetApiV1AuthMfaStatus)
+	r.With(JWTMiddleware).Post("/api/v1/auth/mfa/setup/start", v.PostApiV1AuthMfaSetupStart)
+	r.With(JWTMiddleware).Post("/api/v1/auth/mfa/setup/confirm", v.PostApiV1AuthMfaSetupConfirm)
+	r.With(JWTMiddleware).Post("/api/v1/auth/mfa/disable", v.PostApiV1AuthMfaDisable)
 	r.With(JWTMiddleware).Get("/api/v1/vault", v.GetApiV1Vault)
 	r.With(JWTMiddleware).Post("/api/v1/vault", v.PostApiV1Vault)
 	r.With(JWTMiddleware).Delete("/api/v1/vault/{id}", v.DeleteApiV1VaultId)

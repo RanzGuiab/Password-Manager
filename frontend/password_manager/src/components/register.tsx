@@ -44,10 +44,18 @@ export default function Register({ onRegisterSuccess }: RegisterProps) {
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    const normalizedUsername = username.trim();
+    if (!normalizedUsername) {
+      setStatus("Username is required.");
+      return;
+    }
+
     if (passwordStrength < 3) {
       setStatus("Password is too weak. Please choose a stronger one.");
       return;
     }
+
     setStatus('Generating salt and hashing password...');
     
     try {
@@ -59,12 +67,12 @@ export default function Register({ onRegisterSuccess }: RegisterProps) {
 
       // 3. Send the public parts to the backend
       await axios.post('http://localhost:8080/api/v1/auth/register', {
-        username,
+        username: normalizedUsername,
         password_hash: loginHash
       });
 
       // 4. Store the salt locally for future key derivations
-      localStorage.setItem(`salt_${username}`, arrayBufferToBase64(salt));
+      localStorage.setItem(`salt_${normalizedUsername}`, arrayBufferToBase64(salt));
       
       setStatus('Registration successful! Please log in.');
       onRegisterSuccess();
