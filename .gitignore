@@ -28,3 +28,6 @@ docker-volumes/
 
 # OPENAPI VIEWER
 .42c/
+
+# Markdown Files
+PROJECT_PROGRESS.md
